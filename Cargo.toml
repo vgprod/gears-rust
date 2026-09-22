@@ -146,6 +146,8 @@ members = [
     "gears/system/quota-enforcement/quota-enforcement-sdk",
     "gears/system/quota-enforcement/quota-enforcement",
     "gears/system/quota-enforcement/plugins/quota-enforcement-storage-plugin",
+    "gears/system/quota-enforcement/plugins/quota-enforcement-engine-cel",
+    "gears/system/quota-enforcement/plugins/quota-enforcement-engine-most-restrictive",
     "gears/mini-chat/mini-chat-sdk",
     "gears/mini-chat/mini-chat",
     "examples/toolkit/api-contracts/api-contracts-sdk",
@@ -300,6 +302,7 @@ string_lit_as_bytes = "deny"
 verbose_file_reads = "deny"
 
 [workspace.dependencies]
+cel-core = "=0.5.1"
 # libs
 toolkit = { package = "cf-gears-toolkit", version = "0.9.1", path = "libs/toolkit" }
 toolkit-http = { package = "cf-gears-toolkit-http", version = "0.6.17", path = "libs/toolkit-http" }
@@ -360,6 +363,8 @@ account-management = { package = "cf-gears-account-management", version = "0.9.1
 usage-collector = { package = "cf-gears-usage-collector", version = "0.3.4", path = "gears/system/usage-collector/usage-collector" }
 quota-enforcement = { package = "cf-gears-quota-enforcement", version = "0.1.0", path = "gears/system/quota-enforcement/quota-enforcement" }
 quota-enforcement-storage-plugin = { package = "cf-gears-quota-enforcement-storage-plugin", version = "0.1.0", path = "gears/system/quota-enforcement/plugins/quota-enforcement-storage-plugin" }
+quota-enforcement-engine-cel = { package = "cf-gears-quota-enforcement-engine-cel", version = "0.1.0", path = "gears/system/quota-enforcement/plugins/quota-enforcement-engine-cel" }
+quota-enforcement-engine-most-restrictive = { package = "cf-gears-quota-enforcement-engine-most-restrictive", version = "0.1.0", path = "gears/system/quota-enforcement/plugins/quota-enforcement-engine-most-restrictive" }
 cluster = { package = "cf-gears-cluster", version = "0.2.8", path = "gears/system/cluster/cluster" }
 
 cf-gears-cluster-sdk = { version = "0.2.7", path = "gears/system/cluster/cluster-sdk" }
