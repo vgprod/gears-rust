@@ -3063,6 +3063,7 @@ dependencies = [
  "cf-gears-toolkit-security",
  "cf-gears-types-registry",
  "cf-gears-types-registry-sdk",
+ "criterion",
  "gts",
  "inventory",
  "jsonschema",
@@ -3106,6 +3107,7 @@ name = "cf-gears-quota-enforcement-sdk"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "cf-gears-toolkit-canonical-errors",
  "cf-gears-toolkit-gts",
  "cf-gears-toolkit-security",
