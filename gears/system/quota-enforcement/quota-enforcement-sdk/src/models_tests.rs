@@ -832,8 +832,8 @@ fn a_debit_request_ignores_decision_shaped_fields_a_caller_echoed_back() {
     let request: DebitRequest = serde_json::from_value(json!({
         "attribution": {
             "tenant_id": "00000000-0000-0000-0000-000000000001",
-            "metric": "gts.cf.qe.metric.type.v1~acme.tokens.v1",
-            "subjects": [{"kind": "gts.cf.core.qe.scope.v1~cf.qe.scope.tenant.v1", "id": "t-1"}],
+            "metric": "gts.cf.core.qe.metric_type.v1~acme.tokens.v1",
+            "subjects": [{"kind": "gts.cf.core.qe.scope.v1~cf.core.qe.tenant.v1", "id": "t-1"}],
             "metadata": {}
         },
         "amount": 5,
@@ -853,7 +853,7 @@ fn an_attribution_inside_a_request_keeps_rejecting_its_own_unknown_fields() {
     let error = serde_json::from_value::<DebitRequest>(json!({
         "attribution": {
             "tenant_id": "00000000-0000-0000-0000-000000000001",
-            "metric": "gts.cf.qe.metric.type.v1~acme.tokens.v1",
+            "metric": "gts.cf.core.qe.metric_type.v1~acme.tokens.v1",
             "subjects": [],
             "metadata": {},
             "tenant": "typo"
@@ -871,7 +871,7 @@ fn a_signed_amount_reaches_the_domain_instead_of_failing_deserialization() {
     let request: DebitRequest = serde_json::from_value(json!({
         "attribution": {
             "tenant_id": "00000000-0000-0000-0000-000000000001",
-            "metric": "gts.cf.qe.metric.type.v1~acme.tokens.v1",
+            "metric": "gts.cf.core.qe.metric_type.v1~acme.tokens.v1",
             "subjects": [],
             "metadata": {}
         },
