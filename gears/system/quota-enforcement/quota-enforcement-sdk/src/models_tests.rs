@@ -1093,7 +1093,7 @@ fn a_rollback_names_the_namespace_of_the_operation_it_reverses() {
     let legacy: crate::models::RollbackRequest = serde_json::from_value(json!({
         "attribution": {
             "tenant_id": "00000000-0000-0000-0000-000000000001",
-            "metric": "gts.cf.qe.metric.type.v1~acme.tokens.v1",
+            "metric": "gts.cf.core.qe.metric_type.v1~acme.tokens.v1",
             "subjects": [],
             "metadata": {}
         },
