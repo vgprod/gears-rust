@@ -74,6 +74,7 @@ impl QeMetricsMeter {
         Arc::new(Self::new(&meter, config))
     }
 
+    /// Count one denial under its closed reason label.
     fn add_denial(&self, reason: DenialReason) {
         // @cpt-begin:cpt-cf-quota-enforcement-algo-telemetry-emission:p1:inst-tel-emit
         // @cpt-begin:cpt-cf-quota-enforcement-algo-telemetry-emission:p1:inst-tel-highcard
