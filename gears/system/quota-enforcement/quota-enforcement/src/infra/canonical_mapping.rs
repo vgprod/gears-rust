@@ -10,15 +10,19 @@ use toolkit_canonical_errors::{CanonicalError, resource_error};
 
 use crate::domain::error::{DomainError, ResourceKind};
 
+/// A Quota, the resource a canonical error names.
 #[resource_error(gts_id!("cf.core.qe.quota.v1~"))]
 pub(crate) struct QuotaResource;
 
+/// A Policy, the resource a canonical error names.
 #[resource_error(gts_id!("cf.core.qe.policy.v1~"))]
 pub(crate) struct PolicyResource;
 
+/// A lease, the resource a canonical error names.
 #[resource_error(gts_id!("cf.core.qe.lease.v1~"))]
 pub(crate) struct LeaseResource;
 
+/// A recorded operation, the resource a canonical error names.
 #[resource_error(gts_id!("cf.core.qe.operation.v1~"))]
 pub(crate) struct OperationResource;
 
