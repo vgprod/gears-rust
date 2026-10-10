@@ -38,6 +38,39 @@ fn quota_type_round_trips_through_its_gts_instance_id() {
     }
 }
 
+fn round_trip<T>(all: &[T], id: fn(T) -> &'static str)
+where
+    T: Copy + PartialEq + std::fmt::Debug + std::str::FromStr<Err = UnknownValue>,
+{
+    for value in all {
+        assert_eq!(id(*value).parse::<T>().expect("parse back"), *value);
+    }
+}
+
+#[test]
+fn every_gts_enum_parses_its_own_ids_and_keeps_the_wire_form() {
+    round_trip(QuotaType::ALL, QuotaType::as_gts_id);
+    round_trip(EnforcementMode::ALL, EnforcementMode::as_gts_id);
+    round_trip(QuotaSource::ALL, QuotaSource::as_gts_id);
+    round_trip(PeriodType::ALL, PeriodType::as_gts_id);
+    assert_eq!(
+        QuotaType::Consumption.as_gts_id(),
+        "gts.cf.core.qe.quota_type.v1~cf.core.qe.consumption.v1"
+    );
+    assert_eq!(
+        EnforcementMode::BASE_TYPE_ID,
+        "gts.cf.core.qe.enforcement_type.v1~"
+    );
+    assert_eq!(
+        QuotaSource::Operator.as_gts_id(),
+        "gts.cf.core.qe.source_type.v1~cf.core.qe.operator.v1"
+    );
+    assert_eq!(
+        PeriodType::OneTime.as_gts_id(),
+        "gts.cf.core.qe.period_type.v1~cf.core.qe.one_time.v1"
+    );
+}
+
 #[test]
 fn gts_enums_reject_short_names_and_unknown_ids() {
     let err = "allocation"
