@@ -1,7 +1,7 @@
 name: Sync main from upstream
 on:
   schedule:
-    - cron: "17 * * * *"   # hourly
+    - cron: "7 5 * * *"   # daily 05:07 UTC = 06:07 CET / 07:07 CEST
   workflow_dispatch:
 permissions: {}
 jobs:
