@@ -1,0 +1,13 @@
+name: Sync main from upstream
+on:
+  schedule:
+    - cron: "17 * * * *"   # hourly
+  workflow_dispatch:
+permissions: {}
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh repo sync "$GITHUB_REPOSITORY" --branch main --force
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN }}
