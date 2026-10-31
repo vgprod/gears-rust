@@ -78,6 +78,7 @@ uuid = { workspace = true }
 inventory = { workspace = true }
 
 [dev-dependencies]
+toolkit-security = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
 # Unconditional: [dev-dependencies] can't be optional; usage is #![cfg(feature="clickhouse")]-gated.

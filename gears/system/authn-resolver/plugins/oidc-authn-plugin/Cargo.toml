@@ -31,7 +31,7 @@ authn-resolver = { workspace = true }
 toolkit.workspace = true
 toolkit-gts = { workspace = true }
 toolkit-macros.workspace = true
-toolkit-security.workspace = true
+toolkit-security = { workspace = true, features = ["jwt"] }
 inventory.workspace = true
 
 # JWT validation

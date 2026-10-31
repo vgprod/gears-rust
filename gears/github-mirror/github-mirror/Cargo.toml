@@ -60,7 +60,6 @@ strum = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-aws-lc-rs = { workspace = true }
 hex = { workspace = true }
 flate2 = { workspace = true }
 url = { workspace = true }

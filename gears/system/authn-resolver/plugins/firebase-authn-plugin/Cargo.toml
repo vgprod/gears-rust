@@ -20,7 +20,7 @@ workspace = true
 [dependencies]
 toolkit = { workspace = true }
 toolkit-macros = { workspace = true }
-toolkit-security = { workspace = true }
+toolkit-security = { workspace = true, features = ["jwt"] }
 toolkit-http = { workspace = true }
 toolkit-gts = { workspace = true }
 authn-resolver-sdk = { package = "cf-gears-authn-resolver-sdk", version = "0.3.40", path = "../../authn-resolver-sdk" }

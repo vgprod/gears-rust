@@ -479,7 +479,8 @@ bss-approval = { package = "cf-gears-bss-approval", path = "gears/bss/libs/appro
 bss-rest = { package = "cf-gears-bss-rest", path = "gears/bss/libs/rest" }
 # Validated decimal money in major units, exact arithmetic and canonical decimal text.
 bss-money = { package = "cf-gears-bss-money", version = "0.2.1", path = "gears/bss/libs/money" }
-# FIPS-validated SHA-256 for the ledger idempotency payload fingerprint.
+# Ordinary P-256 key generation and independent test oracles for toolkit-security.
+# FIPS primitives route through the facade's OS provider.
 aws-lc-rs = "1.17"
 
 # settings-service
@@ -807,8 +808,7 @@ ureq = "3.3"
 # Time handling
 time = { version = "0.3.47", features = ["serde", "formatting", "parsing"] }
 
-# Cryptographic utilities
-sha2 = "0.10"
+# Hexadecimal encoding
 hex = "0.4"
 
 # JWT and authentication
