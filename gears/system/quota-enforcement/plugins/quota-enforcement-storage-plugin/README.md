@@ -94,6 +94,7 @@ gears:
     config:
       vendor: "constructorfabric"   # must match gears.quota-enforcement.config.storage_vendor
       priority: 100
+      config_refresh_secs: 30   # an edit of the *_config tables applies within this many seconds
 ```
 
 ## SQLite and concurrent writes

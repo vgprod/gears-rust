@@ -57,7 +57,7 @@ use uuid::Uuid;
 use super::consumption_store::{
     AppliedEntry, OwnedMutation, RACE_ATTEMPTS, RecordBlob, RecordWrite, Replay,
     SqlConsumptionStore, TxError, actor_of, counters_of, credit_counter, debit_counter,
-    decision_of, expires_at, lift, replay_of, settle_elapsed_rows, write_record,
+    decision_of, lift, replay_of, settle_elapsed_rows, write_record,
 };
 use super::locking::{lock_scopes, with_budget};
 use super::repo::lease_repo;
@@ -97,6 +97,9 @@ impl SqlConsumptionStore {
         let tenant = mutation.applicable.tenant_id;
         let metric = mutation.applicable.metric.clone();
         let budget = self.contention_budget(Some(metric.as_str())).await?;
+        let config = self.config().await?;
+        let cap = config.lease_cap(tenant, metric.as_str());
+        let retention = config.idempotency_retention(tenant, metric.as_str());
         for attempt in 0..RACE_ATTEMPTS {
             // A refused lock rolls this transaction back and runs it
             // again under the budget; a race goes to the arbiter below.
@@ -182,9 +185,6 @@ impl SqlConsumptionStore {
                                 )
                                 .await?;
                                 // @cpt-end:cpt-cf-quota-enforcement-algo-lazy-expiry:p1:inst-lzy-cap
-                                let cap =
-                                    SqlConsumptionStore::lease_cap(tx, tenant, metric.as_str())
-                                        .await?;
                                 if live >= cap {
                                     return Err(TxError::Storage(
                                         StorageError::LeaseInflightLimitExceeded,
@@ -278,7 +278,7 @@ impl SqlConsumptionStore {
                             let blob = serde_json::to_string(&acquired).map_err(|error| {
                                 TxError::Storage(StorageError::Internal(error.to_string()))
                             })?;
-                            let deadline = expires_at(tx, tenant, metric.as_str(), now).await?;
+                            let deadline = now + retention;
                             // The blob is the whole outcome, not only the decision,
                             // so a replay returns the token this call issued.
                             write_record(
@@ -324,6 +324,10 @@ impl SqlConsumptionStore {
     /// # Errors
     ///
     /// As the contract documents for `commit_lease` and `release_lease`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one settlement transaction, in lock order"
+    )]
     pub async fn settle_lease_impl(
         &self,
         ctx: &SecurityContext,
@@ -354,6 +358,10 @@ impl SqlConsumptionStore {
         let write = idempotency.clone().complete(subject_key, operation);
         let budget = self.contention_budget(Some(&preview.metric)).await?;
         let tenant = idempotency.tenant_id;
+        let retention = self
+            .config()
+            .await?
+            .idempotency_retention(tenant, &preview.metric);
         // A refused lock rolls this transaction back and runs it again under
         // the budget.
         with_budget(budget, || {
@@ -543,7 +551,7 @@ impl SqlConsumptionStore {
                                 })
                                 .collect(),
                         );
-                        let deadline = expires_at(tx, tenant, &metric, now).await?;
+                        let deadline = now + retention;
                         // A commit produces a debit its own key can reverse, so it
                         // records what it kept and the attribution it was
                         // authorized under. A release reverses nothing.
@@ -791,17 +799,6 @@ impl SqlConsumptionStore {
                     })
             })
             .collect()
-    }
-
-    /// The `(tenant, metric)` cap, most specific configured row first.
-    async fn lease_cap(tx: &impl DBRunner, tenant: TenantId, metric: &str) -> Result<u64, TxError> {
-        let configured = super::repo::config_repo::read_lease_capacity(
-            tx,
-            &tenant.as_uuid().to_string(),
-            metric,
-        )
-        .await?;
-        Ok(u64::try_from(configured.unwrap_or(1000)).unwrap_or(1000))
     }
 
     /// Apply an acquisition's plan: the same counter movement a debit makes,

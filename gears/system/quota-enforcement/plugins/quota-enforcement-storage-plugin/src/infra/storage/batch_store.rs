@@ -47,6 +47,7 @@ use toolkit_db::secure::DBRunner;
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
+use super::config_cache::ConfigSnapshot;
 use super::consumption_store::{
     Applied, Clock, LockedCounter, OwnedMutation, RACE_ATTEMPTS, RecordBlob, RecordWrite, Replay,
     SqlConsumptionStore, TxError, actor_of, counters_of, expires_at, lift, lock_counters_of,
@@ -123,6 +124,7 @@ struct BatchTx<'a> {
     actor: &'a Actor,
     clock: &'a Clock,
     enqueuer: &'a Arc<dyn NotificationEnqueuer>,
+    config: &'a ConfigSnapshot,
 }
 
 /// Every applicable Quota of the batch, locked once.
@@ -172,6 +174,7 @@ impl SqlConsumptionStore {
     ) -> Result<TransitionOutcome<Vec<EvaluatedDebit>>, StorageError> {
         let actor = actor_of(ctx);
         let budget = self.batch_budget(batch).await?;
+        let config = self.config().await?;
         for attempt in 0..RACE_ATTEMPTS {
             // A refused lock rolls the transaction back and runs it again,
             // within the contention budget and, once armed, the batch timer.
@@ -183,6 +186,7 @@ impl SqlConsumptionStore {
                 let scope = scope.clone();
                 let events = events.to_vec();
                 let owned = OwnedBatch::of(batch);
+                let config = Arc::clone(&config);
                 settling(
                     wakes,
                     self.db.transaction_ref_mapped(move |tx| {
@@ -196,6 +200,7 @@ impl SqlConsumptionStore {
                                 actor: &actor,
                                 clock: &clock,
                                 enqueuer: &enqueuer,
+                                config: &config,
                             };
                             Self::batch_in_tx(tx, &env, &owned).await
                         })
@@ -332,7 +337,7 @@ impl SqlConsumptionStore {
         {
             return Ok(TransitionOutcome::Applied(unrecorded(evaluated.decisions)));
         }
-        let deadline = longest_retention(tx, batch, now).await?;
+        let deadline = longest_retention(env.config, batch, now);
         let blob = serde_json::to_string(&BatchRecord::new(evaluated.decisions.clone()))?;
         write_record(
             tx,
@@ -560,11 +565,11 @@ fn owner_scope<'a>(batch: &'a OwnedBatch, union: &LockedUnion, id: Uuid) -> &'a 
 
 /// Now plus the longest idempotency retention of any item's metric, so the
 /// envelope replays for as long as any of its metrics promises.
-async fn longest_retention(
-    tx: &impl DBRunner,
+fn longest_retention(
+    config: &ConfigSnapshot,
     batch: &OwnedBatch,
     now: OffsetDateTime,
-) -> Result<OffsetDateTime, TxError> {
+) -> OffsetDateTime {
     let mut longest = now;
     let mut seen: Vec<&str> = Vec::new();
     for item in &batch.items {
@@ -574,9 +579,9 @@ async fn longest_retention(
             continue;
         }
         seen.push(metric);
-        longest = longest.max(expires_at(tx, applicable.tenant_id, metric, now).await?);
+        longest = longest.max(expires_at(config, applicable.tenant_id, metric, now));
     }
-    Ok(longest)
+    longest
 }
 
 /// An engine that ran out of the batch's time is the batch timing out.

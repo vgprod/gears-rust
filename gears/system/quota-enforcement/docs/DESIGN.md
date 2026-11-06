@@ -2257,6 +2257,14 @@ plugin chooses physical layout.
 | `lease_capacity_config`           | Per-`(tenant, metric)` active-lease cap overrides; most specific row wins (`(t, m)`, `(t, *)`, `(*, m)`, `(*, *)`), the `(*, *)` row = platform default (1000 per PRD §5.6 / `cpt-cf-quota-enforcement-fr-lease-timeout`); enforced by I7. | Indefinite                                                                                                                                                 |
 | `idempotency_retention_config`    | Per-`(tenant, metric)` idempotency retention overrides; same most-specific-row lookup as `lease_capacity_config`, `(*, *)` = platform default                                                                                                                                            | Indefinite                                                                                                                                                 |
 
+**Configuration freshness.** The reference plugin resolves the three `*_config` tables from an in-memory snapshot,
+not per operation. The first read after the refresh interval (`config_refresh_secs`, default 30 s) reloads it by
+reading every row of the three tables (operator overrides, expected to be few), so an operator edit takes effect within
+one interval on every replica. The caller that finds the snapshot stale waits for that reload; concurrent callers keep
+reading the current snapshot and wait only for the very first load. A failed reload keeps serving the last good
+snapshot, logs a warning with its age, and is retried after one more interval. Callers queued behind a failed first
+load get an unavailable error instead of retrying it one after another.
+
 **Cross-table invariants** (enforced by the storage plugin under I1):
 
 - Every `lease_holds.lease_id` references an existing `leases.lease_id` (FK, ON DELETE CASCADE).

@@ -33,6 +33,7 @@ use crate::domain::ports::{Actor, QuotaStore, StoreError};
 use crate::infra::outbox::{
     AttemptWakes, EnqueueError, NotificationEnqueuer, NotificationOutbox, settling,
 };
+use crate::infra::storage::config_cache::{ConfigCache, DEFAULT_REFRESH};
 use crate::infra::storage::consumption_store::{TxError as CounterTxError, credit_counter};
 use crate::infra::storage::cursor::{self, MAX_FILTER_IDS};
 use crate::infra::storage::entity::quota;
@@ -55,6 +56,7 @@ pub struct SqlQuotaStore {
     db: Db,
     enqueuer: Arc<dyn NotificationOutbox>,
     clock: crate::infra::storage::consumption_store::Clock,
+    config: Arc<ConfigCache>,
 }
 
 /// Every way a transaction body can fail, before the lift to [`StoreError`].
@@ -196,11 +198,7 @@ impl SqlQuotaStore {
     /// Bind the store to the plugin's database and its notification outbox.
     #[must_use]
     pub fn new(db: Db, enqueuer: Arc<dyn NotificationOutbox>) -> Self {
-        Self {
-            db,
-            enqueuer,
-            clock: Arc::new(OffsetDateTime::now_utc),
-        }
+        Self::with_clock(db, enqueuer, Arc::new(OffsetDateTime::now_utc))
     }
 
     /// The same store on a caller-driven clock. The cap guard compares the
@@ -216,7 +214,15 @@ impl SqlQuotaStore {
             db,
             enqueuer,
             clock,
+            config: Arc::new(ConfigCache::new(DEFAULT_REFRESH)),
         }
+    }
+
+    /// The same store, reading the configuration through `config`.
+    #[must_use]
+    pub fn with_config(mut self, config: Arc<ConfigCache>) -> Self {
+        self.config = config;
+        self
     }
 
     fn now(&self) -> OffsetDateTime {

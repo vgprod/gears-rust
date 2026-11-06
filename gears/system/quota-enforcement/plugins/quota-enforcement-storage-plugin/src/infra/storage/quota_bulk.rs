@@ -52,16 +52,14 @@ use toolkit_security::AccessScope;
 use super::{PreparedCreate, SqlQuotaStore, TxError, lift};
 use crate::domain::ports::{Actor, StoreError};
 use crate::infra::outbox::{AttemptWakes, settling};
-use crate::infra::storage::consumption_store::{DEFAULT_RETENTION_SECS, scope_key_of};
+use crate::infra::storage::config_cache::ConfigSnapshot;
+use crate::infra::storage::consumption_store::{read_config, scope_key_of};
 use crate::infra::storage::entity::quota;
 use crate::infra::storage::locking::{
-    ContentionBudget, ContentionError, contention_budget_of, lock_scopes, scope_lock_not_available,
-    with_budget,
+    ContentionBudget, ContentionError, lock_scopes, scope_lock_not_available, with_budget,
 };
 use crate::infra::storage::quota_mapping::{self, QuotaUpdate, STATUS_ACTIVE};
-use crate::infra::storage::repo::{
-    RowWait, config_repo, idempotency_repo as idem_repo, lease_repo, quota_repo,
-};
+use crate::infra::storage::repo::{RowWait, idempotency_repo as idem_repo, lease_repo, quota_repo};
 
 /// Attempts at an envelope whose record insert lost a race; the next attempt
 /// finds the winner's record under the stripe and replays it.
@@ -142,22 +140,16 @@ async fn stored_outcome<T: DeserializeOwned>(
 }
 
 /// Now plus the longest idempotency retention of any of `metrics`.
-async fn retention_deadline<'a>(
-    tx: &impl DBRunner,
+fn retention_deadline<'a>(
+    config: &ConfigSnapshot,
     tenant: TenantId,
     metrics: impl IntoIterator<Item = &'a str>,
     now: OffsetDateTime,
-) -> Result<OffsetDateTime, TxError> {
-    let tenant = tenant.as_uuid().to_string();
-    let mut deadline = now;
-    for metric in metrics {
-        let seconds = config_repo::read_idempotency_retention(tx, &tenant, metric)
-            .await?
-            .unwrap_or(DEFAULT_RETENTION_SECS)
-            .max(0);
-        deadline = deadline.max(now + time::Duration::seconds(seconds));
-    }
-    Ok(deadline)
+) -> OffsetDateTime {
+    metrics
+        .into_iter()
+        .map(|metric| now + config.idempotency_retention(tenant, metric))
+        .fold(now, OffsetDateTime::max)
 }
 
 /// Record the committed `outcome` under the envelope key, in the transaction.
@@ -264,30 +256,24 @@ fn check_replay_targets(
 // @cpt-dod:cpt-cf-quota-enforcement-dod-bulk-atomicity:p2
 // @cpt-dod:cpt-cf-quota-enforcement-dod-bulk-deactivate-cascade:p2
 impl SqlQuotaStore {
-    /// The contention budget of the envelope: the strictest of `metrics`, or
-    /// the platform default when there is none.
-    async fn envelope_budget<'a>(
+    /// The configuration snapshot and the envelope's contention budget: the
+    /// strictest of `metrics`, or the platform default when there is none.
+    async fn envelope_config<'a>(
         &self,
         operation: &'static str,
         metrics: impl IntoIterator<Item = &'a str>,
-    ) -> Result<ContentionBudget, StoreError> {
-        let lift_budget = |error: StorageError| {
-            tracing::warn!(target: "qe.storage", operation, error = %error, "contention budget read failed");
-            StoreError::Unavailable { operation }
-        };
-        let mut budget: Option<ContentionBudget> = None;
-        for metric in metrics {
-            let one = contention_budget_of(&self.db, Some(metric))
-                .await
-                .map_err(lift_budget)?;
-            budget = Some(budget.map_or(one, |budget| budget.stricter(one)));
-        }
-        match budget {
-            Some(budget) => Ok(budget),
-            None => contention_budget_of(&self.db, None)
-                .await
-                .map_err(lift_budget),
-        }
+    ) -> Result<(Arc<ConfigSnapshot>, ContentionBudget), StoreError> {
+        let config = read_config(&self.config, &self.db, self.now())
+            .await
+            .map_err(|_: StorageError| StoreError::Unavailable { operation })?;
+        let timeout = metrics
+            .into_iter()
+            .map(|metric| config.contention_timeout(metric))
+            .min()
+            .unwrap_or_else(|| {
+                config.contention_timeout(crate::infra::storage::entity::DEFAULT_KEY)
+            });
+        Ok((config, ContentionBudget::starting_now(timeout)))
     }
 
     /// The metrics of the targets visible under their items' scopes, read
@@ -362,12 +348,13 @@ impl SqlQuotaStore {
                 .entry(item.draft.metric.as_str().to_owned())
                 .or_insert_with(|| item.scope.clone());
         }
-        let budget = self
-            .envelope_budget(OPERATION, metrics.keys().map(String::as_str))
+        let (config, budget) = self
+            .envelope_config(OPERATION, metrics.keys().map(String::as_str))
             .await?;
         let owned = Arc::new((envelope.clone(), prepared, metrics, actor.clone()));
         self.run_envelope(OPERATION, budget, || {
             let owned = Arc::clone(&owned);
+            let config = Arc::clone(&config);
             let wakes = AttemptWakes::begin(&self.enqueuer);
             let enqueuer = wakes.enqueuer();
             settling(
@@ -417,9 +404,12 @@ impl SqlQuotaStore {
                             });
                         }
                         let outcome = BulkCreated { items };
-                        let expires_at =
-                            retention_deadline(tx, tenant, metrics.keys().map(String::as_str), now)
-                                .await?;
+                        let expires_at = retention_deadline(
+                            &config,
+                            tenant,
+                            metrics.keys().map(String::as_str),
+                            now,
+                        );
                         record(tx, &envelope.idempotency, &outcome, now, expires_at).await?;
                         Ok(TransitionOutcome::Applied(outcome))
                     })
@@ -454,8 +444,8 @@ impl SqlQuotaStore {
                     .collect::<Vec<_>>(),
             )
             .await?;
-        let budget = self
-            .envelope_budget(OPERATION, metrics.iter().map(String::as_str))
+        let (config, budget) = self
+            .envelope_config(OPERATION, metrics.iter().map(String::as_str))
             .await?;
         let owned: Arc<(BulkUpdateEnvelope, Vec<QuotaUpdate>, Actor)> =
             Arc::new((envelope.clone(), updates, actor.clone()));
@@ -463,6 +453,7 @@ impl SqlQuotaStore {
         self.run_envelope(OPERATION, budget, || {
             let owned = Arc::clone(&owned);
             let clock = Arc::clone(&clock);
+            let config = Arc::clone(&config);
             let wakes = AttemptWakes::begin(&self.enqueuer);
             let enqueuer = wakes.enqueuer();
             settling(
@@ -521,9 +512,12 @@ impl SqlQuotaStore {
                             });
                         }
                         let outcome = BulkUpdated { items };
-                        let expires_at =
-                            retention_deadline(tx, tenant, metrics.iter().map(String::as_str), now)
-                                .await?;
+                        let expires_at = retention_deadline(
+                            &config,
+                            tenant,
+                            metrics.iter().map(String::as_str),
+                            now,
+                        );
                         record(tx, &envelope.idempotency, &outcome, now, expires_at).await?;
                         Ok(TransitionOutcome::Applied(outcome))
                     })
@@ -551,8 +545,8 @@ impl SqlQuotaStore {
                     .collect::<Vec<_>>(),
             )
             .await?;
-        let budget = self
-            .envelope_budget(OPERATION, metrics.iter().map(String::as_str))
+        let (config, budget) = self
+            .envelope_config(OPERATION, metrics.iter().map(String::as_str))
             .await?;
         let owned: Arc<(BulkDeactivateEnvelope, Actor)> =
             Arc::new((envelope.clone(), actor.clone()));
@@ -560,6 +554,7 @@ impl SqlQuotaStore {
         self.run_envelope(OPERATION, budget, || {
             let owned = Arc::clone(&owned);
             let clock = Arc::clone(&clock);
+            let config = Arc::clone(&config);
             let wakes = AttemptWakes::begin(&self.enqueuer);
             let enqueuer = wakes.enqueuer();
             settling(
@@ -623,9 +618,12 @@ impl SqlQuotaStore {
                         // @cpt-begin:cpt-cf-quota-enforcement-state-bulk-envelope:p2:inst-qbs-commit
                         // @cpt-begin:cpt-cf-quota-enforcement-algo-bulk-envelope:p2:inst-qbe-return
                         let outcome = BulkDeactivated { items };
-                        let expires_at =
-                            retention_deadline(tx, tenant, metrics.iter().map(String::as_str), now)
-                                .await?;
+                        let expires_at = retention_deadline(
+                            &config,
+                            tenant,
+                            metrics.iter().map(String::as_str),
+                            now,
+                        );
                         record(tx, &envelope.idempotency, &outcome, now, expires_at).await?;
                         Ok(TransitionOutcome::Applied(outcome))
                         // @cpt-end:cpt-cf-quota-enforcement-algo-bulk-envelope:p2:inst-qbe-return

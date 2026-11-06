@@ -4028,6 +4028,7 @@ name = "cf-gears-quota-enforcement-storage-plugin"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "cf-gears-quota-enforcement-sdk",

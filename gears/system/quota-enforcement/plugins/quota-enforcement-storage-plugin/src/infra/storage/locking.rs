@@ -292,35 +292,12 @@ impl SqlConsumptionStore {
         &self,
         metric: Option<&str>,
     ) -> Result<ContentionBudget, StorageError> {
-        contention_budget_of(&self.db, metric).await
+        let timeout = self
+            .config()
+            .await?
+            .contention_timeout(metric.unwrap_or(crate::infra::storage::entity::DEFAULT_KEY));
+        Ok(ContentionBudget::starting_now(timeout))
     }
-}
-
-/// The contention budget configured for `metric` over `db`, starting now; the
-/// read every store with a stripe shares.
-///
-/// # Errors
-///
-/// `Unavailable` when the configuration cannot be read.
-pub(super) async fn contention_budget_of(
-    db: &toolkit_db::Db,
-    metric: Option<&str>,
-) -> Result<ContentionBudget, StorageError> {
-    let conn = db.conn().map_err(|error| {
-        super::consumption_store::unavailable("read contention timeout", "config", &error)
-    })?;
-    let configured = super::repo::config_repo::read_contention_timeout(
-        &conn,
-        metric.unwrap_or(crate::infra::storage::entity::DEFAULT_KEY),
-    )
-    .await
-    .map_err(|error| {
-        super::consumption_store::unavailable("read contention timeout", "config", &error)
-    })?;
-    let millis = u64::try_from(configured.unwrap_or(0)).unwrap_or(0);
-    Ok(ContentionBudget::starting_now(Duration::from_millis(
-        millis,
-    )))
 }
 
 #[cfg(test)]
