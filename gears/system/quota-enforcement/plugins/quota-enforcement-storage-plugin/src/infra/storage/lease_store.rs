@@ -28,9 +28,10 @@
 //!
 //! One order for every primitive in this plugin (ADR-0002, extended past
 //! Quota rows): Quota rows ascending by id, then idempotency records, then
-//! lease rows ascending by token, then capacity rows, then counter rows, then
-//! the hold rows under their counter, then inserts. A primitive may skip a
-//! rank and never goes back; anything it must know before locking — a lease's
+//! lease rows ascending by token, then capacity rows (acquisitions only), then
+//! counter rows (the waiting paths ascending by `(quota_id, period_id)`), then
+//! the hold rows under their counter, then inserts. A primitive may skip a rank
+//! and never goes back; anything it must know before locking — a lease's
 //! metric and holds, both immutable once written — is read unscoped of rank
 //! first and re-read under the lock.
 //!
@@ -39,6 +40,7 @@
 //! until the budget is spent ([`super::locking`]). The sweeper has no budget and
 //! queues.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,6 +61,7 @@ use super::consumption_store::{
     SqlConsumptionStore, TxError, actor_of, counters_of, credit_counter, debit_counter,
     decision_of, lift, replay_of, settle_elapsed_rows, write_record,
 };
+use super::entity::lease_hold;
 use super::locking::{lock_scopes, with_budget};
 use super::repo::lease_repo;
 use super::repo::lease_repo::RowWait;
@@ -158,7 +161,7 @@ impl SqlConsumptionStore {
                                 // The cap is consulted only now: a verdict the
                                 // engine refused is the caller's answer whether or
                                 // not the cap is full.
-                                let row = lease_repo::lock_capacity_row(
+                                lease_repo::lock_capacity_row(
                                 tx,
                                 scope,
                                 tenant.as_uuid(),
@@ -252,16 +255,6 @@ impl SqlConsumptionStore {
                                     )
                                     .await?;
                                 }
-                                lease_repo::bump_active_count(
-                                    tx,
-                                    scope,
-                                    tenant.as_uuid(),
-                                    metric.as_str(),
-                                    row.active_count,
-                                    1,
-                                    now,
-                                )
-                                .await?;
                                 (Some(token), Some(expiry))
                                 // @cpt-end:cpt-cf-quota-enforcement-flow-lease-acquire:p1:inst-lac-insert
                             } else {
@@ -324,10 +317,6 @@ impl SqlConsumptionStore {
     /// # Errors
     ///
     /// As the contract documents for `commit_lease` and `release_lease`.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one settlement transaction, in lock order"
-    )]
     pub async fn settle_lease_impl(
         &self,
         ctx: &SecurityContext,
@@ -371,7 +360,6 @@ impl SqlConsumptionStore {
             let scope_owned = scope.clone();
             let events = events.to_vec();
             let write_owned = write.clone();
-            let metric = preview.metric.clone();
             let actor = actor.clone();
             settling(
                 wakes,
@@ -434,15 +422,6 @@ impl SqlConsumptionStore {
                         // @cpt-end:cpt-cf-quota-enforcement-flow-lease-commit:p1:inst-lcm-overcommit-if
                         // @cpt-begin:cpt-cf-quota-enforcement-flow-lease-commit:p1:inst-lcm-apply
                         // @cpt-begin:cpt-cf-quota-enforcement-flow-lease-release:p1:inst-lrl-apply
-                        // Rank 4.
-                        let capacity = lease_repo::lock_capacity_row(
-                            tx,
-                            scope,
-                            tenant.as_uuid(),
-                            &metric,
-                            RowWait::Nowait,
-                        )
-                        .await?;
                         // Rank 5 and 5b, ascending by `quota_id` as `holds_of`
                         // returns them.
                         let mut entries = Vec::new();
@@ -522,20 +501,6 @@ impl SqlConsumptionStore {
                         }
                         // @cpt-end:cpt-cf-quota-enforcement-state-lease:p1:inst-lst-release
                         // @cpt-end:cpt-cf-quota-enforcement-state-lease:p1:inst-lst-commit
-                        // Diagnostic only, so a missing row costs the count, not the
-                        // transition.
-                        if let Some(capacity) = &capacity {
-                            lease_repo::bump_active_count(
-                                tx,
-                                scope,
-                                tenant.as_uuid(),
-                                &metric,
-                                capacity.active_count,
-                                -1,
-                                now,
-                            )
-                            .await?;
-                        }
                         // Settling evaluates nothing: the plan was fixed at
                         // acquisition, so the recorded decision is what it kept.
                         let decision = Decision::allowed_with_plan(
@@ -620,30 +585,24 @@ impl SqlConsumptionStore {
                     // @cpt-begin:cpt-cf-quota-enforcement-algo-lease-sweep:p1:inst-swp-reclaim
                     let leases =
                         lease_repo::expired_for_update(tx, &scope, batch_size, before).await?;
-                    let mut reclaimed = Vec::with_capacity(leases.len());
+                    let mut held = Vec::with_capacity(leases.len());
                     for lease in leases {
-                        let token = LeaseToken::from(lease.token);
                         let holds = lease_repo::holds_of(tx, &scope, lease.token).await?;
-                        let capacity = lease_repo::lock_capacity_row(
-                            tx,
-                            &scope,
-                            lease.tenant_id,
-                            &lease.metric,
-                            RowWait::Wait,
-                        )
-                        .await?;
+                        held.push((lease, holds));
+                    }
+                    lock_hold_counters(
+                        tx,
+                        &scope,
+                        held.iter().flat_map(|(_, holds)| holds),
+                        RowWait::Wait,
+                    )
+                    .await?;
+                    let mut reclaimed = Vec::with_capacity(held.len());
+                    for (lease, holds) in held {
+                        let token = LeaseToken::from(lease.token);
                         let mut returned = Vec::with_capacity(holds.len());
                         for hold in &holds {
                             let amount = u64::try_from(hold.held_amount).unwrap_or(0);
-                            // Rank 5 before 5b, as every writer takes them.
-                            counter_value_of(
-                                tx,
-                                &scope,
-                                hold.quota_id,
-                                hold.period_id,
-                                RowWait::Wait,
-                            )
-                            .await?;
                             // Only what nobody has given back: a writer that met
                             // this hold first already returned it.
                             if lease_repo::mark_hold_returned(
@@ -690,20 +649,6 @@ impl SqlConsumptionStore {
                             continue;
                         }
                         // @cpt-end:cpt-cf-quota-enforcement-state-lease:p1:inst-lst-autorelease
-                        // Diagnostic only, so a missing row costs the count, not the
-                        // transition.
-                        if let Some(capacity) = &capacity {
-                            lease_repo::bump_active_count(
-                                tx,
-                                &scope,
-                                lease.tenant_id,
-                                &lease.metric,
-                                capacity.active_count,
-                                -1,
-                                before,
-                            )
-                            .await?;
-                        }
                         operation_log_repo::append(
                             tx,
                             &scope,
@@ -833,6 +778,23 @@ impl SqlConsumptionStore {
         }
         Ok(entries)
     }
+}
+
+/// Rank 5 for a whole waiting transaction: each counter under `holds` once, ascending, so two never cross.
+pub(super) async fn lock_hold_counters<'a>(
+    tx: &impl DBRunner,
+    scope: &AccessScope,
+    holds: impl IntoIterator<Item = &'a lease_hold::Model>,
+    wait: RowWait,
+) -> Result<(), TxError> {
+    let counters: BTreeSet<(Uuid, Option<Uuid>)> = holds
+        .into_iter()
+        .map(|hold| (hold.quota_id, hold.period_id))
+        .collect();
+    for (quota_id, period_id) in counters {
+        counter_value_of(tx, scope, quota_id, period_id, wait).await?;
+    }
+    Ok(())
 }
 
 /// The counter value of one row, read under its rank-5 lock, which a hold stamp must follow.

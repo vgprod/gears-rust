@@ -9,9 +9,8 @@
 //! scope. The envelope's idempotency stripe follows (rank 2), `NOWAIT`, and a
 //! refused stripe retries the whole transaction within the contention budget.
 //! The rest is locked before the first item, a rank at a time, ascending:
-//! an update's target counters; a deactivation's live leases on any target,
-//! their capacity rows, and the counter of every hold of those leases, on
-//! whichever Quota. Items run in submission order and find their rows held,
+//! an update's target counters; a deactivation's live leases on any target
+//! and the counter of every hold of those leases, on whichever Quota. Items run in submission order and find their rows held,
 //! so the envelope never goes back a rank. The budget bounds the stripe
 //! contention only: every other row waits as single-item Quota CRUD does.
 //! Create has no Quota row to lock: its stripe comes first, then the
