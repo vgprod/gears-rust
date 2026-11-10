@@ -19,6 +19,7 @@
 
 use crate::domain::model::Sequence;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -27,7 +28,7 @@ use cluster_sdk::cache::{PutRequest, Ttl};
 use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, Set};
 use toolkit_db::DBProvider;
-use toolkit_db::outbox::Outbox;
+use toolkit_db::outbox::{Outbox, TraceSubscription};
 use toolkit_db::secure::{SecureDeleteExt, SecureEntityExt, SecureUpdateExt, secure_insert};
 use toolkit_gts::GtsInstanceId;
 use toolkit_security::AccessScope;
@@ -37,12 +38,13 @@ use crate::domain::error::{DomainError, ErrorCode};
 use crate::domain::idempotency::{IdempotencyGuard, ProducerIdempotencyOutcome, PublishEnqueue};
 use crate::domain::ingest::{
     ProducerCursors, ProducerMode, ProducerRecord, ProducerRegistration, ProducerRegistry,
-    ProducerTopicCursors,
+    ProducerTopicCursors, SyncTrace,
 };
 use crate::domain::model::{ConsumerGroup, ConsumerGroupKind, Cursor};
 use crate::domain::producer_reset::ProducerResetScope;
 use crate::domain::repo::{ConsumerGroupRepo, CursorRepo, RoutingMarkers};
 use crate::domain::specification::SpecificationManager;
+use crate::domain::sync_wait::{SyncWait, SyncWaitRegistry};
 use crate::infra::storage::entity::{
     consumer_group, cursor, outbox_identity, producer, producer_sequence,
 };
@@ -207,9 +209,9 @@ impl Storage {
 
     fn cache(&self) -> Result<&ClusterCacheV1, DomainError> {
         if self.cache.get().is_none() {
-            // Same reason the publish path logs its refusal: without a line
-            // here, a request served in the startup window leaves no server-
-            // side trace of why it was turned away.
+            // Logged here as well as where a request's error becomes a `503`:
+            // the background consumer-group sweeper reaches `cache()` too, and
+            // this line names the startup window whichever caller hit it.
             tracing::warn!("request refused: the cluster cache is not wired yet");
         }
         self.cache
@@ -487,9 +489,9 @@ impl Storage {
         // conditions for the caller, so they are reported as an unavailable
         // storage path rather than an internal failure.
         let Some(outbox) = self.outbox.get() else {
-            // Worth a line even though the caller gets a `503`: this is the
-            // one refusal that means the instance was advertised before it
-            // could serve, and it is otherwise invisible from the server side.
+            // Its own line although the `503` mapping logs the same reason:
+            // this is the one refusal that means the instance was advertised
+            // before it could serve, so it reads as such in the log.
             tracing::warn!("publish refused: the ingest outbox pipeline is not running yet");
             return Err(DomainError::StorageUnavailable {
                 reason: "the ingest outbox pipeline is not running yet".to_owned(),
@@ -722,6 +724,47 @@ impl RoutingMarkers for Storage {
     async fn unmark_group(&self, group: &GtsInstanceId) -> Result<(), DomainError> {
         self.cache()?.delete(&group_marker_key(group)?).await?;
         Ok(())
+    }
+}
+
+impl SyncWaitRegistry for Storage {
+    fn subscribe(&self, trace: SyncTrace) -> Box<dyn SyncWait> {
+        // The ingest outbox owns the trace machinery. If it is not wired yet
+        // the publish's own `check_and_enqueue` fails with a `503` before the
+        // wait is ever awaited, so an unsubscribed waiter is only ever dropped.
+        let subscription = self
+            .outbox
+            .get()
+            .and_then(|outbox| outbox.subscribe(&trace.id().to_string()).ok());
+        Box::new(TraceWaiter { subscription })
+    }
+}
+
+/// A [`SyncWait`] over an outbox [`TraceSubscription`]: awaiting it holds until
+/// the traced batch completes or the wait elapses.
+struct TraceWaiter {
+    /// `None` when the outbox was not wired (so nothing could subscribe); the
+    /// wait then resolves at once to the honest `202`.
+    subscription: Option<TraceSubscription>,
+}
+
+#[async_trait]
+impl SyncWait for TraceWaiter {
+    async fn stored(self: Box<Self>, wait: Duration) -> bool {
+        let Some(subscription) = self.subscription else {
+            // Nothing subscribed (the outbox was not wired): the honest `202`.
+            return false;
+        };
+        // A completion within the wait means the traced batch was stored. Ingest
+        // dead-letters nothing an ingest row can hit (feature 0007 §4.1 retries
+        // forever), so a completion is always clean today; the `is_clean` guard
+        // keeps a batch that ended with a failure from being reported stored,
+        // should an ingest row ever become dead-letterable. A `None` (the outbox
+        // stopped) or an elapsed wait is the honest `202`.
+        matches!(
+            tokio::time::timeout(wait, subscription.completion()).await,
+            Ok(Some(outcome)) if outcome.is_clean()
+        )
     }
 }
 

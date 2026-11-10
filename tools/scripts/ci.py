@@ -23,6 +23,7 @@ from urllib.error import URLError, HTTPError
 # Add scripts/ to sys.path so lib.platform is importable
 sys.path.insert(0, os.path.dirname(__file__))
 
+from lib.e2e_budgets import SERVER_STARTUP_TIMEOUT_SECS
 from lib.platform import (
     e2e_env_overrides,
     find_binary,
@@ -34,7 +35,8 @@ from lib.platform import (
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PYTHON = sys.executable or "python"
-E2E_STARTUP_TIMEOUT_SECS = 15
+# Shared with the e2e harness; see testing/e2e/lib/budgets.py.
+E2E_STARTUP_TIMEOUT_SECS = SERVER_STARTUP_TIMEOUT_SECS
 
 
 def run_cmd(cmd, env=None, cwd=None):

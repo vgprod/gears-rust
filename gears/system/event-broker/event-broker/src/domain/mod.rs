@@ -16,12 +16,14 @@ pub mod ingest;
 pub mod local_broker;
 pub mod model;
 pub mod outbox;
+pub mod paging;
 pub mod producer_reset;
 pub mod projection;
 pub mod repo;
 pub mod resolution;
 pub mod specification;
 pub mod streaming;
+pub mod sync_wait;
 
 #[cfg(test)]
 mod local_broker_tests;
