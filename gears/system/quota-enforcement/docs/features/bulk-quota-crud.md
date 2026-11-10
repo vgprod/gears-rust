@@ -369,9 +369,9 @@ no lease semantics are re-specified here.
   breaking-change gate; an item referencing `type = rate` fails the envelope with canonical `Unimplemented` (501); in
   both cases no patch from the batch is applied
 - [ ] A bulk-deactivate of K Quotas with active leases marks all K deactivated and every active lease against them
-  resolved-by-deactivation in one transaction, returns held capacity to the acquisition-period counters, and enqueues one `quota-changed (deactivated)` event per Quota plus one
-  `lease-resolved-by-deactivation` event per lease in the same transaction; an injected failure mid-cascade leaves
-  every Quota active and every lease untouched
+  resolved-by-deactivation in one transaction, returns held capacity to the acquisition-period counters, and enqueues
+  one `quota-changed (deactivated)` event per Quota plus one `lease-resolved-by-deactivation` event per lease in the
+  same transaction; an injected failure mid-cascade leaves every Quota active and every lease untouched
 - [ ] A bulk-deactivate containing one unknown quota ID fails the envelope with canonical `NotFound` attributed by
   index; one containing an already-deactivated Quota fails with `QUOTA_DEACTIVATED` attributed by index; in both
   cases the remaining Quotas stay active

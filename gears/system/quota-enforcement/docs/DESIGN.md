@@ -1210,11 +1210,11 @@ runtime, so it has no `DomainError` lift target. The full `DomainError` enum liv
   `consumed > new_cap`; check is in-tx with row-level lock.
 - **I7. Active-lease cap** — `acquire_lease` returns `LeaseInflightLimitExceeded` when the count of live leases on the
   per-`(tenant, metric)` pair, taken under that pair's capacity-row lock, would exceed the operator-configured cap
-  (default **1000** per PRD §5.6 / `cpt-cf-quota-enforcement-fr-lease-timeout`), atomically same-tx with the lease insert. The cap is sourced from
-  `lease_capacity_config(tenant_id, metric, max_active_leases)` (sparse override table keyed by `(tenant_id, metric)`,
-  where the key `*` means "any"; the most specific row wins, in the order `(tenant, metric)`, `(tenant, *)`,
-  `(*, metric)`, `(*, *)`, and the seeded `(*, *)` row is the platform default; in-process LRU cache with operator-tunable TTL (P1 reference default: 60 s),
-  same pattern as the contention-timeout config in I8).
+  (default **1000** per PRD §5.6 / `cpt-cf-quota-enforcement-fr-lease-timeout`), atomically same-tx with the lease
+  insert. The cap is sourced from `lease_capacity_config(tenant_id, metric, max_active_leases)` (sparse override table
+  keyed by `(tenant_id, metric)`, where the key `*` means "any"; the most specific row wins, in the order
+  `(tenant, metric)`, `(tenant, *)`, `(*, metric)`, `(*, *)`, and the seeded `(*, *)` row is the platform default),
+  read from the reference plugin's configuration snapshot (see Configuration freshness).
 - **I8. Acquisition contention timeout** — `apply_*` and `acquire_lease` respect the operator-configured **per-metric**
   contention timeout; on timeout, return `LeaseContentionTimeout`. Mechanism is plugin-internal.
 - **I9. Isolation** — backend MUST provide isolation sufficient to serialize concurrent row mutations under the

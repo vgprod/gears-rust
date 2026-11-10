@@ -27,6 +27,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::Barrier;
+
 use gts::GtsTypeId;
 use quota_enforcement_sdk::engine::{
     EvaluationContext, EvaluationLimits, EvaluationOutcome, PolicySchemaSnapshot,
@@ -34,10 +36,11 @@ use quota_enforcement_sdk::engine::{
 };
 use quota_enforcement_sdk::testing::quota_draft;
 use quota_enforcement_sdk::{
-    ApplicableQuotas, AppliedMutation, AttributionDigest, Decision, DecisionResult, EvaluatedLease,
-    EvaluatedMutation, IdempotencyScope, IdempotencySubjectKey, IdempotencyWrite, LeaseToken,
-    MetricId, OperationType, PartialIdempotencyWrite, PayloadHash, PolicyDraft, PolicyScope,
-    QuotaDebitPlan, QuotaDraft, QuotaId, StorageError, SubjectRef, TenantId, TransitionOutcome,
+    ApplicableQuotas, AppliedMutation, AttributionDigest, BulkDeactivateEntry,
+    BulkDeactivateEnvelope, Decision, DecisionResult, EvaluatedLease, EvaluatedMutation,
+    IdempotencyScope, IdempotencySubjectKey, IdempotencyWrite, LeaseToken, MetricId, OperationType,
+    PartialIdempotencyWrite, PayloadHash, PolicyDraft, PolicyScope, QuotaDebitPlan, QuotaDraft,
+    QuotaId, StorageError, SubjectRef, TenantId, TransitionOutcome,
 };
 use sea_orm_migration::MigratorTrait;
 use testcontainers::core::ExecCommand;
@@ -53,6 +56,9 @@ use uuid::Uuid;
 
 use quota_enforcement_storage_plugin::domain::ports::LeaseStore;
 use quota_enforcement_storage_plugin::infra::storage::Migrator;
+use quota_enforcement_storage_plugin::infra::storage::config_cache::{
+    ConfigCache, DEFAULT_REFRESH,
+};
 use quota_enforcement_storage_plugin::infra::storage::repo::lease_repo;
 use quota_enforcement_storage_plugin::{
     Actor, ConsumptionStore, NotificationOutbox, QeOutbox, QuotaStore, SqlConsumptionStore,
@@ -247,18 +253,24 @@ impl PgHarness {
         let clock = Arc::new(Mutex::new(OffsetDateTime::now_utc()));
         let store_reader = Arc::clone(&clock);
         let quota_reader = Arc::clone(&clock);
+        // One configuration cache for both stores, as the gear wires them.
+        let config = Arc::new(ConfigCache::new(DEFAULT_REFRESH));
         Self {
             db: db.clone(),
-            store: Arc::new(SqlConsumptionStore::with_clock(
-                db.clone(),
-                Arc::clone(&enqueuer),
-                Arc::new(move || *store_reader.lock().expect("clock")),
-            )),
+            store: Arc::new(
+                SqlConsumptionStore::with_clock(
+                    db.clone(),
+                    Arc::clone(&enqueuer),
+                    Arc::new(move || *store_reader.lock().expect("clock")),
+                )
+                .with_config(Arc::clone(&config)),
+            ),
             quotas: SqlQuotaStore::with_clock(
                 db.clone(),
                 Arc::clone(&enqueuer),
                 Arc::new(move || *quota_reader.lock().expect("clock")),
-            ),
+            )
+            .with_config(config),
             clock,
             outbox,
             container,
@@ -294,6 +306,8 @@ impl PgHarness {
         )
         .await
         .expect("configure the contention budget");
+        // The edit applies once the configuration snapshot refreshes.
+        self.advance(DEFAULT_REFRESH);
     }
 
     /// The active-lease cap of this tenant and metric (I7).
@@ -313,6 +327,8 @@ impl PgHarness {
         )
         .await
         .expect("configure the lease cap");
+        // The edit applies once the configuration snapshot refreshes.
+        self.advance(DEFAULT_REFRESH);
     }
 
     async fn quota(&self, subject_id: &str, cap: Option<u64>) -> QuotaId {
@@ -341,10 +357,35 @@ impl PgHarness {
         key: &str,
         evaluate: Arc<TransactionEvaluator>,
     ) -> tokio::task::JoinHandle<Acquired> {
+        self.spawn_acquire(holders, amount, key, evaluate, None)
+    }
+
+    /// [`Self::acquire`], started once every racer reaches `start`.
+    fn acquire_at(
+        &self,
+        holders: &[&str],
+        amount: u64,
+        key: &str,
+        start: Arc<Barrier>,
+    ) -> tokio::task::JoinHandle<Acquired> {
+        self.spawn_acquire(holders, amount, key, evaluator(), Some(start))
+    }
+
+    fn spawn_acquire(
+        &self,
+        holders: &[&str],
+        amount: u64,
+        key: &str,
+        evaluate: Arc<TransactionEvaluator>,
+        start: Option<Arc<Barrier>>,
+    ) -> tokio::task::JoinHandle<Acquired> {
         let store = Arc::clone(&self.store);
         let subjects = subjects(holders);
         let key = key.to_owned();
         tokio::spawn(async move {
+            if let Some(start) = start {
+                start.wait().await;
+            }
             let applicable = applicable(subjects.clone());
             let idempotency = IdempotencyWrite {
                 scope: IdempotencyScope {
@@ -776,12 +817,14 @@ async fn only_an_acquisition_waits_on_a_held_capacity_row() {
     let h = PgHarness::up().await;
     h.quota("u1", Some(1_000)).await;
     let deactivated = h.quota("u2", Some(1_000)).await;
+    let bulk_deactivated = h.quota("u3", Some(1_000)).await;
     let expired = h.held(&["u1"], 10, "a1").await;
     h.advance(Duration::from_secs(61));
     let before = h.now();
     let committed = h.held(&["u1"], 10, "a2").await;
     let released = h.held(&["u1"], 10, "a3").await;
     let cascaded = h.held(&["u2"], 10, "a4").await;
+    let bulk_cascaded = h.held(&["u3"], 10, "a7").await;
 
     let (unlock, holder) = h.hold_capacity_row().await;
     let commit = tokio::time::timeout(UNBLOCKED, h.commit(committed, 5, "c1"))
@@ -817,6 +860,32 @@ async fn only_an_acquisition_waits_on_a_held_capacity_row() {
     .expect("the cascade does not wait on the capacity row")
     .expect("the deactivation commits");
     assert_eq!(cascade.resolved_leases, vec![cascaded]);
+    let bulk = BulkDeactivateEnvelope {
+        tenant_id: tenant(),
+        idempotency: IdempotencyWrite {
+            scope: IdempotencyScope {
+                tenant_id: tenant(),
+                subject_key: IdempotencySubjectKey::of(&[]),
+                operation_type: OperationType::BulkDeactivateQuotas,
+                key: "b1".to_owned(),
+            },
+            payload_hash: PayloadHash::from_bytes([9; 32]),
+        },
+        items: vec![BulkDeactivateEntry {
+            idempotency_key: None,
+            scope: scope(),
+            quota_id: bulk_deactivated,
+            events: Vec::new(),
+        }],
+    };
+    let bulk = tokio::time::timeout(UNBLOCKED, h.quotas.bulk_deactivate_quotas(&actor(), &bulk))
+        .await
+        .expect("the bulk cascade does not wait on the capacity row")
+        .expect("the bulk deactivation commits");
+    let TransitionOutcome::Applied(bulk) = bulk else {
+        panic!("a fresh envelope applies: {bulk:?}");
+    };
+    assert_eq!(bulk.items[0].resolved_leases, vec![bulk_cascaded]);
     // The row still guards admission.
     let refused = tokio::time::timeout(UNBLOCKED, h.acquire(&["u1"], 1, "a5"))
         .await
@@ -854,9 +923,10 @@ async fn the_cap_stays_exact_while_releases_interleave_with_acquisitions() {
             most
         })
     };
+    let start = Arc::new(Barrier::new(40));
     let racers: Vec<_> = (0..40_u64)
         .map(|n| {
-            let acquired = h.acquire(&["u1"], 1, &format!("k{n}"));
+            let acquired = h.acquire_at(&["u1"], 1, &format!("k{n}"), Arc::clone(&start));
             let store = Arc::clone(&h.store);
             tokio::spawn(async move {
                 let outcome = acquired.await.expect("join");
@@ -926,10 +996,12 @@ async fn the_capacity_row_alone_holds_the_cap_across_distinct_quotas() {
             most
         })
     };
+    let start = Arc::new(Barrier::new(48));
     let racers: Vec<_> = (0..48_u64)
         .map(|n| {
             let holder = &holders[usize::try_from(n).unwrap() % holders.len()];
-            let acquired = h.acquire(&[holder.as_str()], 1, &format!("k{n}"));
+            let acquired =
+                h.acquire_at(&[holder.as_str()], 1, &format!("k{n}"), Arc::clone(&start));
             let h = Arc::clone(&h);
             tokio::spawn(async move {
                 let outcome = acquired.await.expect("join");

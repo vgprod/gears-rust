@@ -33,7 +33,7 @@ use toolkit_db::{Db, DbError};
 use toolkit_security::{AccessScope, SecurityContext};
 use uuid::Uuid;
 
-use super::config_cache::{ConfigCache, ConfigSnapshot, ConfigUnavailable, DEFAULT_REFRESH};
+use super::config_cache::{ConfigCache, ConfigSnapshot, DEFAULT_REFRESH};
 use super::entity::quota_consumption_counter;
 use super::locking::{ContentionBudget, lock_scopes, with_budget};
 use super::policy_store::{decode_version, scope_key};
@@ -119,31 +119,6 @@ pub(super) fn unavailable(
         "consumption storage backend call failed"
     );
     StorageError::Unavailable(format!("{operation} failed: {source} unavailable"))
-}
-
-/// The configuration snapshot of `cache`, reloaded from `db` once the refresh
-/// interval passed.
-pub(super) async fn read_config(
-    cache: &ConfigCache,
-    db: &Db,
-    now: OffsetDateTime,
-) -> Result<Arc<ConfigSnapshot>, StorageError> {
-    cache
-        .get(now, || async {
-            let conn = db
-                .conn()
-                .map_err(|error| unavailable("read configuration", "config", &error))?;
-            ConfigSnapshot::load(&conn)
-                .await
-                .map_err(|error| unavailable("read configuration", "config", &error))
-        })
-        .await
-}
-
-impl From<ConfigUnavailable> for StorageError {
-    fn from(error: ConfigUnavailable) -> Self {
-        unavailable("read configuration", "config", &error)
-    }
 }
 
 fn corrupt(operation: &'static str, error: &dyn std::fmt::Display) -> StorageError {
@@ -852,7 +827,7 @@ impl SqlConsumptionStore {
 
     /// The configuration snapshot, reloaded once the refresh interval passed.
     pub(super) async fn config(&self) -> Result<Arc<ConfigSnapshot>, StorageError> {
-        read_config(&self.config, &self.db, self.now()).await
+        self.config.read(&self.db, self.now()).await
     }
 
     /// The Quotas of an applicable set, locked ascending by id (ADR-0002).
@@ -1645,10 +1620,8 @@ impl crate::domain::ports::ConsumptionStore for SqlConsumptionStore {
     ) -> Result<TransitionOutcome<EvaluatedDebit>, StorageError> {
         const OPERATION: &str = "apply debit plan";
         let actor = actor_of(ctx);
-        let budget = self
-            .contention_budget(Some(mutation.applicable.metric.as_str()))
-            .await?;
         let config = self.config().await?;
+        let budget = ContentionBudget::of(&config, [mutation.applicable.metric.as_str()]);
         // Each retry is a complete transaction.
         for attempt in 0..RACE_ATTEMPTS {
             // A refused lock rolls this transaction back and runs it
@@ -1731,8 +1704,8 @@ impl crate::domain::ports::ConsumptionStore for SqlConsumptionStore {
             .metric_of(scope, quota_id.as_uuid())
             .await
             .map_err(|error| lift(OPERATION, error))?;
-        let budget = self.contention_budget(metric.as_deref()).await?;
         let config = self.config().await?;
+        let budget = ContentionBudget::of(&config, metric.as_deref());
         // The Quota row lock normally serializes credits; the arbiter is a
         // defensive fallback.
         for attempt in 0..RACE_ATTEMPTS {
@@ -1942,11 +1915,11 @@ impl crate::domain::ports::ConsumptionStore for SqlConsumptionStore {
         let actor = actor_of(ctx);
         // One budget for the whole call, rediscoveries included, named by the
         // metric of the first Quota the original moved.
+        let config = self.config().await?;
         let budget = self
-            .rollback_budget(scope, target)
+            .rollback_budget(&config, scope, target)
             .await
             .map_err(|error| lift(OPERATION, error))?;
-        let config = self.config().await?;
         // The original row lock normally serializes rollbacks; the arbiter also
         // protects a reused key that reaches different Quotas.
         for attempt in 0..RACE_ATTEMPTS {
@@ -2155,6 +2128,7 @@ impl SqlConsumptionStore {
     /// original is absent or moved nothing.
     async fn rollback_budget(
         &self,
+        config: &ConfigSnapshot,
         scope: &AccessScope,
         target: &RollbackTarget,
     ) -> Result<ContentionBudget, TxError> {
@@ -2179,7 +2153,7 @@ impl SqlConsumptionStore {
             Some(quota_id) => self.metric_of(scope, quota_id).await?,
             None => None,
         };
-        Ok(self.contention_budget(metric.as_deref()).await?)
+        Ok(ContentionBudget::of(config, metric.as_deref()))
     }
 
     /// The metric of a Quota, read without a lock: it names the contention

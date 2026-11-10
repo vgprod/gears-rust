@@ -10,9 +10,10 @@
 //! refused stripe retries the whole transaction within the contention budget.
 //! The rest is locked before the first item, a rank at a time, ascending:
 //! an update's target counters; a deactivation's live leases on any target
-//! and the counter of every hold of those leases, on whichever Quota. Items run in submission order and find their rows held,
-//! so the envelope never goes back a rank. The budget bounds the stripe
-//! contention only: every other row waits as single-item Quota CRUD does.
+//! and the counter of every hold of those leases, on whichever Quota. Items
+//! run in submission order and find their rows held, so the envelope never
+//! goes back a rank. The budget bounds the stripe contention only: every
+//! other row waits as single-item Quota CRUD does.
 //! Create has no Quota row to lock: its stripe comes first, then the
 //! capacity rows of its distinct metrics, ascending, which each insert then
 //! finds in place.
@@ -52,7 +53,7 @@ use super::{PreparedCreate, SqlQuotaStore, TxError, lift};
 use crate::domain::ports::{Actor, StoreError};
 use crate::infra::outbox::{AttemptWakes, settling};
 use crate::infra::storage::config_cache::ConfigSnapshot;
-use crate::infra::storage::consumption_store::{read_config, scope_key_of};
+use crate::infra::storage::consumption_store::scope_key_of;
 use crate::infra::storage::entity::quota;
 use crate::infra::storage::locking::{
     ContentionBudget, ContentionError, lock_scopes, scope_lock_not_available, with_budget,
@@ -145,10 +146,7 @@ fn retention_deadline<'a>(
     metrics: impl IntoIterator<Item = &'a str>,
     now: OffsetDateTime,
 ) -> OffsetDateTime {
-    metrics
-        .into_iter()
-        .map(|metric| now + config.idempotency_retention(tenant, metric))
-        .fold(now, OffsetDateTime::max)
+    now + config.longest_retention(metrics.into_iter().map(|metric| (tenant, metric)))
 }
 
 /// Record the committed `outcome` under the envelope key, in the transaction.
@@ -262,17 +260,13 @@ impl SqlQuotaStore {
         operation: &'static str,
         metrics: impl IntoIterator<Item = &'a str>,
     ) -> Result<(Arc<ConfigSnapshot>, ContentionBudget), StoreError> {
-        let config = read_config(&self.config, &self.db, self.now())
+        let config = self
+            .config
+            .read(&self.db, self.now())
             .await
             .map_err(|_: StorageError| StoreError::Unavailable { operation })?;
-        let timeout = metrics
-            .into_iter()
-            .map(|metric| config.contention_timeout(metric))
-            .min()
-            .unwrap_or_else(|| {
-                config.contention_timeout(crate::infra::storage::entity::DEFAULT_KEY)
-            });
-        Ok((config, ContentionBudget::starting_now(timeout)))
+        let budget = ContentionBudget::of(&config, metrics);
+        Ok((config, budget))
     }
 
     /// The metrics of the targets visible under their items' scopes, read

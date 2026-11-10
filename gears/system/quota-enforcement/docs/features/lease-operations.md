@@ -123,7 +123,7 @@ Realises `cpt-cf-quota-enforcement-seq-lease-acquire`.
 
 **Error Scenarios**:
 - `amount <= 0`: `INVALID_AMOUNT` before idempotency lookup, multi-quota evaluation, or any hold acquisition;
-  no idempotency record, no lease row, no capacity hold, and the active-lease counter is unchanged
+  no idempotency record, no lease row, and no capacity hold
 - `ttl` missing or outside `[min_lease_ttl, max_lease_ttl]`: `TTL_OUT_OF_BOUNDS` with the same nothing-persisted
   guarantee; the TTL is never clamped
 - The per-`(tenant, metric)` active-lease cap would be exceeded: `LEASE_INFLIGHT_LIMIT_EXCEEDED` (429) regardless of
@@ -134,7 +134,7 @@ Realises `cpt-cf-quota-enforcement-seq-lease-acquire`.
 **Steps**:
 1. [x] - `p1` - Caller sends `POST /v1/quota-enforcement/leases` with an `AcquireLeaseRequest` carrying caller-supplied attribution, one operation-level metadata object, optional resource, metric, positive integer `amount`, required `ttl`, and idempotency key; foundation admission (`cpt-cf-quota-enforcement-flow-authorized-admission`) and projection-contracts ingress validation have already run - `inst-lac-request`
 2. [x] - `p1` - **IF** `amount <= 0` - `inst-lac-amount-if`
-   1. [x] - `p1` - **RETURN** `INVALID_AMOUNT` (`DomainError::InvalidAmount`, canonical `InvalidArgument`) before idempotency lookup, multi-quota evaluation, or any hold acquisition; no idempotency record, lease row, or capacity hold is created and the per-`(tenant, metric)` active-lease counter is unchanged (`cpt-cf-quota-enforcement-fr-lease-acquire`) - `inst-lac-amount`
+   1. [x] - `p1` - **RETURN** `INVALID_AMOUNT` (`DomainError::InvalidAmount`, canonical `InvalidArgument`) before idempotency lookup, multi-quota evaluation, or any hold acquisition; no idempotency record, lease row, or capacity hold is created (`cpt-cf-quota-enforcement-fr-lease-acquire`) - `inst-lac-amount`
 3. [x] - `p1` - **IF** `ttl` is missing or falls outside the operator-configurable `[min_lease_ttl, max_lease_ttl]` window (platform defaults 1 s and 1 h) - `inst-lac-ttl-if`
    1. [x] - `p1` - **RETURN** `TTL_OUT_OF_BOUNDS` (`DomainError::TtlOutOfBounds`, canonical `InvalidArgument`) at the gateway with the same nothing-persisted guarantee as the `INVALID_AMOUNT` fail-fast; clamping is not performed, because the lease contract entitles the holder to the exact TTL it reserved - `inst-lac-ttl`
 4. [x] - `p1` - Run the pipeline `cpt-cf-quota-enforcement-algo-evaluation-pipeline` with `acquire_lease` as the mutating primitive and `reserve` as the operation type in the idempotency scope; the complete authorized, catalogue-mapped applicable-subject set becomes the acquisition's `IdempotencySubjectKey`, and an exact replay short-circuits through `cpt-cf-quota-enforcement-algo-idempotency-replay` and **RETURN**s the stored `AcquireLeaseOutcome` - `inst-lac-pipeline`
@@ -423,8 +423,8 @@ election TTL plus observation lag. No promise beyond the PRD threshold is added.
 
 - [ ] An acquire with `amount <= 0` fails with `INVALID_AMOUNT`, and an acquire with a missing `ttl` or a `ttl` of
   `min_lease_ttl - 1` or `max_lease_ttl + 1` fails with `TTL_OUT_OF_BOUNDS`, each before idempotency lookup,
-  multi-quota evaluation, or any hold acquisition: no idempotency record, no lease row, no capacity hold, and the
-  active-lease counter is unchanged; the TTL is never silently clamped
+  multi-quota evaluation, or any hold acquisition: no idempotency record, no lease row, and no capacity hold; the TTL
+  is never silently clamped
 - [ ] A successful acquire returns an opaque lease token with `expiry_at` and decreases each applicable Quota's
   remaining capacity by the reserved amount; a replay of the same acquire key returns the original token without a
   second hold; a `Denied` verdict returns HTTP 200 and holds no capacity in any Quota
@@ -498,14 +498,12 @@ election TTL plus observation lag. No promise beyond the PRD threshold is added.
   unit tests; atomic multi-Quota acquisition, contention rejection, lazy expiry under a paused sweeper, and replay
   behavior get integration and concurrency tests against the storage plugin; leader failover and the recovery drill
   are the deployment-level checks named in section 6.
-- **Deactivation cascade (tracked here)**: the quota-lifecycle feature implemented the deactivation orchestration and
-  the reference plugin's `deactivate_quota`, which flips the status under the row lock, logs, and enqueues
-  `quota-changed` but resolves no lease yet (`resolved_leases` is empty). This feature fills the lease half inside that
-  transaction — lock the Quota's active leases, mark them resolved-by-deactivation,
-  return held capacity to the acquisition-period counters, and append one
-  `lease-resolved-by-deactivation` event per lease — which closes `cpt-cf-quota-enforcement-flow-quota-deactivate`,
-  `cpt-cf-quota-enforcement-state-quota-lifecycle`, and `cpt-cf-quota-enforcement-dod-deactivation-cascade` of the
-  quota-lifecycle feature. Lock order stays Quota row, then its counter and lease rows (ADR-0002).
+- **Deactivation cascade**: the reference plugin's `deactivate_quota` flips the status under the row lock and, in
+  the same transaction, resolves the Quota's active leases: it marks them resolved-by-deactivation, returns held
+  capacity to the acquisition-period counters, and appends one `lease-resolved-by-deactivation` event per lease. This
+  closes `cpt-cf-quota-enforcement-flow-quota-deactivate`, `cpt-cf-quota-enforcement-state-quota-lifecycle`, and
+  `cpt-cf-quota-enforcement-dod-deactivation-cascade` of the quota-lifecycle feature. Lock order: the Quota row, then
+  its live leases ascending by token, then the counter of every hold of those leases ascending (ADR-0002).
 - **Non-applicable review domains**: UX/accessibility is not applicable; there is no user-facing surface. Data
   protection inherits the PRD §6.2 rules; lease rows carry tenant-scoped opaque identifiers and follow the
   operation-log retention boundary with no additional feature-specific requirement.

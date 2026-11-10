@@ -59,6 +59,9 @@ use uuid::Uuid;
 
 use quota_enforcement_storage_plugin::domain::ports::LeaseStore;
 use quota_enforcement_storage_plugin::infra::storage::Migrator;
+use quota_enforcement_storage_plugin::infra::storage::config_cache::{
+    ConfigCache, DEFAULT_REFRESH,
+};
 use quota_enforcement_storage_plugin::infra::storage::entity::{
     contention_timeout_config, lease_capacity_config,
 };
@@ -242,10 +245,15 @@ impl Harness {
         let bound = Arc::new(QeOutbox::new());
         bound.bind(Arc::clone(outbox.outbox())).expect("bind once");
         let enqueuer: Arc<dyn NotificationOutbox> = bound;
+        // One configuration cache for both stores, as the gear wires them.
+        let config_cache = Arc::new(ConfigCache::new(DEFAULT_REFRESH));
         let harness = Self {
             db: db.clone(),
-            store: Arc::new(SqlConsumptionStore::new(db.clone(), Arc::clone(&enqueuer))),
-            quotas: SqlQuotaStore::new(db, Arc::clone(&enqueuer)),
+            store: Arc::new(
+                SqlConsumptionStore::new(db.clone(), Arc::clone(&enqueuer))
+                    .with_config(Arc::clone(&config_cache)),
+            ),
+            quotas: SqlQuotaStore::new(db, Arc::clone(&enqueuer)).with_config(config_cache),
             outbox,
             container,
         };

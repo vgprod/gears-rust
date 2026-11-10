@@ -6,9 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
-use quota_enforcement_sdk::TenantId;
+use quota_enforcement_sdk::{StorageError, TenantId};
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
+use toolkit_db::Db;
 use toolkit_db::secure::{DBRunner, ScopeError};
 
 use crate::infra::storage::entity::DEFAULT_KEY;
@@ -74,6 +75,19 @@ impl ConfigSnapshot {
         Duration::from_millis(u64::try_from(millis).unwrap_or(0))
     }
 
+    /// The strictest contention budget of `metrics`, else that of `*` (I8).
+    #[must_use]
+    pub fn strictest_contention_timeout<'a>(
+        &self,
+        metrics: impl IntoIterator<Item = &'a str>,
+    ) -> Duration {
+        metrics
+            .into_iter()
+            .map(|metric| self.contention_timeout(metric))
+            .min()
+            .unwrap_or_else(|| self.contention_timeout(DEFAULT_KEY))
+    }
+
     /// The active-lease cap of `(tenant, metric)` (I7).
     #[must_use]
     pub fn lease_cap(&self, tenant: TenantId, metric: &str) -> u64 {
@@ -88,6 +102,19 @@ impl ConfigSnapshot {
         let seconds = most_specific(&self.idempotency_retention, tenant, metric)
             .unwrap_or(DEFAULT_RETENTION_SECS);
         time::Duration::seconds(seconds.max(0))
+    }
+
+    /// The longest idempotency retention of `pairs`, zero when there is none.
+    #[must_use]
+    pub fn longest_retention<'a>(
+        &self,
+        pairs: impl IntoIterator<Item = (TenantId, &'a str)>,
+    ) -> time::Duration {
+        pairs
+            .into_iter()
+            .map(|(tenant, metric)| self.idempotency_retention(tenant, metric))
+            .max()
+            .unwrap_or(time::Duration::ZERO)
     }
 }
 
@@ -128,6 +155,22 @@ impl std::fmt::Display for ConfigUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("the first configuration load failed")
     }
+}
+
+impl From<ConfigUnavailable> for StorageError {
+    fn from(error: ConfigUnavailable) -> Self {
+        unavailable(&error)
+    }
+}
+
+/// A configuration read that found no snapshot and could not load one.
+fn unavailable(error: &dyn std::fmt::Display) -> StorageError {
+    tracing::warn!(
+        target: LOG_TARGET,
+        error = %error,
+        "configuration read failed"
+    );
+    StorageError::Unavailable("read configuration failed: config unavailable".to_owned())
 }
 
 /// Whether two reads of the published slot saw the same entry.
@@ -225,6 +268,25 @@ impl ConfigCache {
                 Ok(Arc::clone(&published.snapshot))
             }
         }
+    }
+
+    /// The snapshot as of `now`, reloaded from `db` when stale.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::Unavailable`] when there is no snapshot and `db` cannot be read.
+    pub(crate) async fn read(
+        &self,
+        db: &Db,
+        now: OffsetDateTime,
+    ) -> Result<Arc<ConfigSnapshot>, StorageError> {
+        self.get(now, || async {
+            let conn = db.conn().map_err(|error| unavailable(&error))?;
+            ConfigSnapshot::load(&conn)
+                .await
+                .map_err(|error| unavailable(&error))
+        })
+        .await
     }
 }
 

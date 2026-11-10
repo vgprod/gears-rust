@@ -192,6 +192,24 @@ async fn the_most_specific_row_wins_and_defaults_fill_the_rest() {
     }
 }
 
+#[test]
+fn the_strictest_metric_sets_the_budget_and_none_falls_to_the_default() {
+    let mut snapshot = ConfigSnapshot::default();
+    for (metric, millis) in [(M, 40), ("metric-b", 10), (DEFAULT_KEY, 25)] {
+        snapshot
+            .contention_timeout
+            .insert(metric.to_owned(), millis);
+    }
+    let ms = Duration::from_millis;
+    assert_eq!(
+        snapshot.strictest_contention_timeout([M, "metric-b"]),
+        ms(10)
+    );
+    assert_eq!(snapshot.strictest_contention_timeout([M, "unset"]), ms(25));
+    assert_eq!(snapshot.strictest_contention_timeout([M]), ms(40));
+    assert_eq!(snapshot.strictest_contention_timeout(None), ms(25));
+}
+
 const AT: time::OffsetDateTime = datetime!(2026-03-17 10:00:00 UTC);
 
 /// A snapshot whose platform-default lease cap is `cap`.

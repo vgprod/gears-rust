@@ -479,8 +479,8 @@ respectively. No high-cardinality identifier (`quota_id`, `tenant_id`, metric, p
   write snapshots the contract id/version, and a metadata-only update keeps the quota ID stable while emitting
   `quota-changed`
 - [ ] Deactivating a Quota with N active leases marks all N resolved-by-deactivation, returns held capacity to the
-  acquisition-period counters, enqueues one `lease-resolved-by-deactivation` event per lease plus `quota-changed (deactivated)`, and appends the operation-log
-  entry (I1), all in one transaction;
+  acquisition-period counters, enqueues one `lease-resolved-by-deactivation` event per lease plus
+  `quota-changed (deactivated)`, and appends the operation-log entry (I1), all in one transaction;
   `DeactivateOutcome.resolved_leases` lists the N leases; a failure mid-cascade resolves none
 - [ ] A deactivated Quota remains readable through both read endpoints; reads return the full metadata object, the
   `validity_window`, and a `currently_within_window` value consistent with the server clock; list reads are

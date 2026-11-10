@@ -62,7 +62,7 @@ use super::consumption_store::{
     decision_of, lift, replay_of, settle_elapsed_rows, write_record,
 };
 use super::entity::lease_hold;
-use super::locking::{lock_scopes, with_budget};
+use super::locking::{ContentionBudget, lock_scopes, with_budget};
 use super::repo::lease_repo;
 use super::repo::lease_repo::RowWait;
 use super::repo::operation_log_repo::{self, Entry};
@@ -99,8 +99,8 @@ impl SqlConsumptionStore {
         let actor = actor_of(ctx);
         let tenant = mutation.applicable.tenant_id;
         let metric = mutation.applicable.metric.clone();
-        let budget = self.contention_budget(Some(metric.as_str())).await?;
         let config = self.config().await?;
+        let budget = ContentionBudget::of(&config, [metric.as_str()]);
         let cap = config.lease_cap(tenant, metric.as_str());
         let retention = config.idempotency_retention(tenant, metric.as_str());
         for attempt in 0..RACE_ATTEMPTS {
@@ -345,12 +345,10 @@ impl SqlConsumptionStore {
         }
         let subject_key = subject_key_of(&preview.subject_key)?;
         let write = idempotency.clone().complete(subject_key, operation);
-        let budget = self.contention_budget(Some(&preview.metric)).await?;
+        let config = self.config().await?;
+        let budget = ContentionBudget::of(&config, [preview.metric.as_str()]);
         let tenant = idempotency.tenant_id;
-        let retention = self
-            .config()
-            .await?
-            .idempotency_retention(tenant, &preview.metric);
+        let retention = config.idempotency_retention(tenant, &preview.metric);
         // A refused lock rolls this transaction back and runs it again under
         // the budget.
         with_budget(budget, || {
